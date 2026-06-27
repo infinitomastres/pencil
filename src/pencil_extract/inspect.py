@@ -22,7 +22,7 @@ from datetime import datetime, timezone
 from playwright.async_api import Request, Response, async_playwright
 
 from pencil_extract.auth import BASE_URL, open_context
-from pencil_extract.paths import PLAYWRIGHT_DIR, PROBES_DIR, STORAGE_STATE
+from pencil_extract.paths import PROBES_DIR
 
 LOGIN_TIMEOUT_MS = 10 * 60_000  # 10 min — generous, you're typing
 
@@ -55,7 +55,7 @@ async def run() -> None:
         context.on("request", on_request)
         context.on("response", on_response)
 
-        page = await context.new_page()
+        page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(BASE_URL, wait_until="domcontentloaded")
         await page.wait_for_load_state("networkidle")
 
@@ -75,9 +75,7 @@ async def run() -> None:
         )
         await page.wait_for_load_state("networkidle")
 
-        PLAYWRIGHT_DIR.mkdir(parents=True, exist_ok=True)
-        await context.storage_state(path=str(STORAGE_STATE))
-        print(f"Logged in. Session saved to {STORAGE_STATE.relative_to(STORAGE_STATE.parents[1])}.")
+        print("Logged in. Session is cached in .playwright/user-data for reuse.")
 
         (run_dir / "landing.html").write_text(await page.content())
         (run_dir / "landing.url").write_text(page.url + "\n")

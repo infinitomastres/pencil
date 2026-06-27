@@ -15,4 +15,3 @@ PHOTOS_DIR = STAGING_DIR / "photos"
 EVENTS_FILE = STAGING_DIR / "events.json"
 
 PLAYWRIGHT_DIR = REPO_ROOT / ".playwright"
-STORAGE_STATE = PLAYWRIGHT_DIR / "storage.json"
