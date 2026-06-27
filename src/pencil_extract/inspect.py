@@ -1,9 +1,13 @@
 """One-time discovery helper.
 
-Opens a visible browser, logs in, and captures the post-login DOM plus all
-network requests for a short observation window. The output lands in
-`.state/_probes/` (gitignored) so we can read it back and harden the real
-extractors in `photos.py` / `events.py`.
+Opens a visible browser, lets you log in by hand, and captures DOM snapshots
+plus all network requests so we can read them back and harden the real
+extractors in `photos.py` / `events.py`. The login form selectors aren't yet
+known, so this mode does NOT try to auto-login — that's exactly what we're
+discovering here.
+
+After you finish logging in (the URL leaves `#/login`), the session is saved
+to `.playwright/storage.json` so subsequent `extract` runs can reuse it.
 
 Usage:
     python -m pencil_extract inspect
@@ -17,15 +21,13 @@ from datetime import datetime, timezone
 
 from playwright.async_api import Request, Response, async_playwright
 
-from pencil_extract.auth import ensure_logged_in, open_context
-from pencil_extract.config import Config
-from pencil_extract.paths import PROBES_DIR
+from pencil_extract.auth import BASE_URL, open_context
+from pencil_extract.paths import PLAYWRIGHT_DIR, PROBES_DIR, STORAGE_STATE
 
-OBSERVATION_SECONDS = 20
+LOGIN_TIMEOUT_MS = 10 * 60_000  # 10 min — generous, you're typing
 
 
 async def run() -> None:
-    config = Config.from_env()
     PROBES_DIR.mkdir(parents=True, exist_ok=True)
     run_dir = PROBES_DIR / datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     run_dir.mkdir()
@@ -53,18 +55,47 @@ async def run() -> None:
         context.on("request", on_request)
         context.on("response", on_response)
 
-        page = await ensure_logged_in(context, config)
-        print(f"Logged in. Recording for {OBSERVATION_SECONDS}s. Click around (Photos, Calendar) in the browser.")
-        await asyncio.sleep(OBSERVATION_SECONDS)
+        page = await context.new_page()
+        await page.goto(BASE_URL, wait_until="domcontentloaded")
+        await page.wait_for_load_state("networkidle")
 
-        dom_html = await page.content()
-        (run_dir / "landing.html").write_text(dom_html)
+        (run_dir / "login.html").write_text(await page.content())
+        (run_dir / "login.url").write_text(page.url + "\n")
+
+        print()
+        print("=" * 60)
+        print(" LOG IN IN THE BROWSER.")
+        print(" I'll proceed automatically once the URL leaves #/login.")
+        print("=" * 60)
+        print()
+
+        await page.wait_for_url(
+            lambda url: "#/login" not in url,
+            timeout=LOGIN_TIMEOUT_MS,
+        )
+        await page.wait_for_load_state("networkidle")
+
+        PLAYWRIGHT_DIR.mkdir(parents=True, exist_ok=True)
+        await context.storage_state(path=str(STORAGE_STATE))
+        print(f"Logged in. Session saved to {STORAGE_STATE.relative_to(STORAGE_STATE.parents[1])}.")
+
+        (run_dir / "landing.html").write_text(await page.content())
         (run_dir / "landing.url").write_text(page.url + "\n")
+
+        print()
+        print("Now click around the app in the browser: visit the Photos")
+        print("section, the Calendar section, scroll a bit. When you're done,")
+        print("come back here and press Enter to save the captures.")
+        print()
+        await asyncio.to_thread(input, "Press Enter when done... ")
+
+        (run_dir / "final.html").write_text(await page.content())
+        (run_dir / "final.url").write_text(page.url + "\n")
         (run_dir / "requests.json").write_text(json.dumps(requests, indent=2) + "\n")
 
         await context.close()
 
-    print(f"Probes written to {run_dir}")
+    print(f"\nProbes written to {run_dir.relative_to(run_dir.parents[2])}")
 
 
 def main() -> None:
