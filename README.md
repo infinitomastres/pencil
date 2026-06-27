@@ -17,13 +17,24 @@ the repo so the incremental diff works across machines.
 
 ## Setup
 
+Requires Python 3.11+. On macOS, install via Homebrew (`brew install python`)
+if you only have the system Python 3.9.
+
+Homebrew Python won't let you `pip install` globally (PEP 668), so use a venv:
+
 ```bash
+python3 -m venv .venv
+source .venv/bin/activate           # every new shell; deactivate with `deactivate`
+
 pip install -e .
 playwright install chromium
 
 cp .env.example .env
 # fill PENCIL_EMAIL, PENCIL_PASSWORD, DRIVE_FOLDER_ID, CALENDAR_ID
 ```
+
+Once the venv is active, plain `python` and `pip` work; `python -m pencil_extract …`
+runs the CLI. The `.venv/` directory is gitignored.
 
 ## First run: discover selectors
 
