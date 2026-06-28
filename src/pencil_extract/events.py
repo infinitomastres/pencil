@@ -54,10 +54,19 @@ def scrape(seen: Seen, captures: Captures) -> list[StagedEvent]:
 
 
 def _flatten_locations(captures: Captures) -> dict[str, str]:
-    """Build location_id → name from any captured /locations/all responses."""
+    """Build location_id → name from any captured /locations/all responses.
+
+    Pencil wraps the list as `{success: true, locations: [...]}`.
+    """
     out: dict[str, str] = {}
     for cap in captures.locations:
-        for loc in _as_list(cap.body):
+        body = cap.body
+        items: list = []
+        if isinstance(body, dict):
+            items = body.get("locations") or body.get("data") or []
+        elif isinstance(body, list):
+            items = body
+        for loc in items:
             if not isinstance(loc, dict):
                 continue
             lid = str(loc.get("id") or loc.get("location_id") or "")
@@ -71,7 +80,8 @@ def _as_list(body: Any) -> list[Any]:
     if isinstance(body, list):
         return body
     if isinstance(body, dict):
-        for key in ("data", "appointments", "events", "items", "results"):
+        # appointments-per-user returns {success, datetime, appointments: [...]}
+        for key in ("appointments", "data", "events", "items", "results"):
             v = body.get(key)
             if isinstance(v, list):
                 return v
