@@ -49,19 +49,41 @@ async def scrape(page: Page, seen: Seen, captures: Captures) -> list[StagedPhoto
         print("WARNING: no /memory-maker responses captured — did the photos page load?")
         return []
 
-    # Aggregate every memory we saw the SPA fetch, then paginate forward
-    # from the largest `skip` seen per (kid, location, utc) tuple.
+    # The SPA only fetches photos for the *current* kid. Get the full kid
+    # list from /get-realted-users so we can pull every kid's photos.
+    sniffed_anchors = _anchors(captures.photos_pages)
+    if not sniffed_anchors:
+        print("WARNING: couldn't parse query params from sniffed photo URLs.")
+        return []
+
+    # Use the first sniffed (location-id, user_utc) as defaults for kids the
+    # SPA didn't itself fetch — they're per-account, not per-kid.
+    first_anchor = next(iter(sniffed_anchors))
+    default_loc, default_utc = first_anchor[1], first_anchor[2]
+    sniffed_by_kid = {a[0]: (a[1], a[2], max_skip)
+                      for a, max_skip in sniffed_anchors.items()}
+
+    kid_ids = _all_kid_ids(captures) or list(sniffed_by_kid.keys())
+    print(f"Found {len(kid_ids)} kid id(s) to fetch photos for: {kid_ids}")
+
     all_memories: list[Any] = []
+    # Start with what the SPA already gave us so we don't re-fetch those pages.
     for cap in captures.photos_pages:
         all_memories.extend(_as_list(cap.body))
 
-    for anchor, max_skip in _anchors(captures.photos_pages).items():
-        kid_id, loc_id, utc = anchor
-        skip = max_skip + PAGE_SIZE
+    for kid_id in kid_ids:
+        if kid_id in sniffed_by_kid:
+            loc_id, utc, max_skip = sniffed_by_kid[kid_id]
+            skip = max_skip + PAGE_SIZE   # continue paginating where the SPA stopped
+        else:
+            loc_id, utc, skip = default_loc, default_utc, 0  # start from scratch
+
         while True:
             url = _build_url(kid_id, loc_id, utc, skip)
             resp = await page.request.get(url)
             if not resp.ok:
+                if skip == 0:
+                    print(f"  kid {kid_id}: HTTP {resp.status} — skipping")
                 break
             try:
                 body = await resp.json()
@@ -127,6 +149,48 @@ def _anchors(caps: list[Capture]) -> dict[tuple[str, str, str], int]:
         if skip > out.get(key, -1):
             out[key] = skip
     return out
+
+
+def _all_kid_ids(captures: Captures) -> list[str]:
+    """Pull kid IDs from any /get-realted-users response, defensively.
+
+    We don't know the exact shape — probe a few common containers and
+    extract whatever has an id-like field. Returns IDs in encounter
+    order, deduped.
+    """
+    out: list[str] = []
+    seen_ids: set[str] = set()
+    for cap in captures.related:
+        for kid in _kids_from_related(cap.body):
+            kid_id = str(
+                kid.get("id")
+                or kid.get("kid_id")
+                or kid.get("kidId")
+                or kid.get("_id")
+                or ""
+            )
+            if kid_id and kid_id not in seen_ids:
+                seen_ids.add(kid_id)
+                out.append(kid_id)
+    return out
+
+
+def _kids_from_related(body: Any) -> list[dict]:
+    """Find the list of kid dicts inside a /get-realted-users body."""
+    if isinstance(body, list):
+        return [x for x in body if isinstance(x, dict)]
+    if isinstance(body, dict):
+        for key in (
+            "kids", "Kids", "children", "Children",
+            "totalKids", "users", "Users",
+            "relatedUsers", "related_users", "relatedKids", "data",
+        ):
+            v = body.get(key)
+            if isinstance(v, list):
+                kids = [x for x in v if isinstance(x, dict)]
+                if kids:
+                    return kids
+    return []
 
 
 def _build_url(kid_id: str, loc_id: str, utc: str, skip: int) -> str:
