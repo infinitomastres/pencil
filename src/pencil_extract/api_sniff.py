@@ -38,6 +38,7 @@ class Captures:
     events: list[Capture] = field(default_factory=list)
     related: list[Capture] = field(default_factory=list)
     locations: list[Capture] = field(default_factory=list)
+    messages: list[Capture] = field(default_factory=list)
 
 
 class Sniffer:
@@ -69,6 +70,10 @@ class Sniffer:
                 body = await response.json()
                 self.captures.locations.append(Capture(url, body))
                 self._dump("locations", url, body)
+            elif _is_messages_url(url):
+                body = await response.json()
+                self.captures.messages.append(Capture(url, body))
+                self._dump("messages", url, body)
         except Exception:
             # Response may have been consumed, body may not be JSON, network
             # may have flaked. The captures we got are what we got.
@@ -87,3 +92,16 @@ class Sniffer:
     async def settle(self, seconds: float = 1.5) -> None:
         """Give in-flight responses a beat to land in handlers."""
         await asyncio.sleep(seconds)
+
+
+def _is_messages_url(url: str) -> bool:
+    """Probe several URL fragments since we don't yet know the full message API."""
+    fragments = (
+        "/get-staff-pending-messages",
+        "/get-staff-messages",
+        "/messages",
+        "/mensajes",
+        "/threads",
+        "/conversations",
+    )
+    return any(f in url for f in fragments)

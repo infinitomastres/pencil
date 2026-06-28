@@ -1,16 +1,18 @@
 # pencil-extract
 
-Pull photos and calendar events out of the [Pencil](https://www.pencilapp.net)
-school-family portal (`familias.pencilapp.net`) and into your own Google Drive
-and Google Calendar.
+Pull photos, calendar events, and teacher messages out of the
+[Pencil](https://www.pencilapp.net) school-family portal
+(`familias.pencilapp.net`) into your own Google Drive / Calendar and into
+a plain-text "what's new" summary you can scan.
 
 Two stages:
 
-1. **Extract** — a Python CLI logs in with a headless browser, scrapes anything
-   new since the last run, and writes it to `staging/`.
-2. **Sync** — you ask Claude (in a session opened in this repo) to push the
-   staged artifacts to Drive/Calendar via the Google MCP servers. See
-   [`SYNC.md`](./SYNC.md) for the exact procedure Claude follows.
+1. **Extract** — a Python CLI logs in with Playwright, scrapes anything new
+   since the last run (photos, events, messages), and writes it to `staging/`.
+2. **Sync + summarize** — open Claude in this repo and say "sync" or
+   "summarize". `SYNC.md` covers Drive/Calendar pushes; `SUMMARIZE.md` turns
+   `staging/messages.json` into `staging/summary.md` bucketed by
+   homework / permission slips / events / needs-response.
 
 State of what's already been synced lives in `.state/seen.json`, committed to
 the repo so the incremental diff works across machines.
@@ -54,9 +56,11 @@ python -m pencil_extract inspect
 # 1. Stage anything new since the last run
 python -m pencil_extract extract
 
-# 2. Open Claude in this repo and say: "sync the staged stuff."
-#    Claude follows SYNC.md: uploads photos to Drive, creates Calendar events,
-#    updates .state/seen.json, clears staging/, and commits.
+# 2. Open Claude in this repo and either:
+#    - "sync" — pushes photos to Drive, events to Calendar, summarizes
+#      messages, and updates .state/seen.json. Follows SYNC.md.
+#    - "summarize" — just turns staging/messages.json into
+#      staging/summary.md without touching Drive/Calendar. Follows SUMMARIZE.md.
 ```
 
 Other commands:
@@ -68,8 +72,9 @@ python -m pencil_extract clear-staging   # wipe staging/ without touching state
 ## Files of note
 
 - `src/pencil_extract/` — the package
-- `.state/seen.json` — committed list of photo/event IDs already synced
+- `.state/seen.json` — committed list of photo/event/message IDs already synced
 - `staging/` — gitignored; populated by `extract`, drained by `sync`
-- `.playwright/storage.json` — gitignored; persisted session so we skip the
-  login form when the cookie is still valid
-- `SYNC.md` — the procedure Claude runs during stage 2
+- `.playwright/user-data/` — gitignored; persisted browser profile so we skip
+  the login form when the cookie is still valid
+- `SYNC.md` — Drive + Calendar push procedure (Claude follows this)
+- `SUMMARIZE.md` — message-analysis procedure (Claude follows this)

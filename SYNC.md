@@ -1,8 +1,11 @@
 # Sync procedure (Claude follows this when asked to "sync")
 
 Stage 2 of the pipeline. The Python extractor has already populated `staging/`
-with new photos and events. Push them to Google Drive and Google Calendar via
-the MCP servers, mark them as seen, and clean up.
+with new photos, events, and messages. This procedure handles photos and
+events (Drive + Calendar via MCP). For the message-summarizing step see
+[`SUMMARIZE.md`](./SUMMARIZE.md) — sync them as well by running the
+summarize procedure on `staging/messages.json` and then appending the
+processed message IDs to `state.messages`.
 
 Read `.env` for `DRIVE_FOLDER_ID`, `CALENDAR_ID`, and `TIMEZONE`. If any of
 those is missing, stop and ask the user.
@@ -40,19 +43,28 @@ those is missing, stop and ask the user.
    - On success, collect the photo's stable ID (from the sidecar).
    - On failure, leave the file + sidecar in place and report.
 
-4. **Update state and clean staging.**
+4. **Summarize messages.**
+   - If `staging/messages.json` exists with entries, run the procedure in
+     [`SUMMARIZE.md`](./SUMMARIZE.md): writes `staging/summary.md` and
+     gives you the bucketed heads-up.
+   - Collect the IDs of every message that appeared in the summary input
+     (whether actionable or not — they're all "processed").
+
+5. **Update state and clean staging.**
    - Append the successfully-uploaded photo IDs to `state.photos` in
      `.state/seen.json` (dedup, sorted).
    - Append the successfully-created event IDs to `state.events`.
+   - Append the summarized message IDs to `state.messages`.
    - Save `.state/seen.json`.
    - Delete the successfully-synced files from `staging/` (keep failures so the
-     next `extract` + `sync` cycle retries them).
+     next `extract` + `sync` cycle retries them). Leave `summary.md` in
+     place so you can read it; it'll be overwritten by the next sync.
 
-5. **Commit.**
+6. **Commit.**
    - Stage `.state/seen.json` only (staging is gitignored).
-   - Commit with message: `sync: <N> photos, <M> events`.
+   - Commit with message: `sync: <N> photos, <M> events, <K> messages`.
    - Do **not** push automatically — leave that to the user.
 
-6. **Report.**
-   - One line: how many photos synced, how many events synced, how many
-     failures (with reasons).
+7. **Report.**
+   - One line: how many photos synced, events synced, messages summarized,
+     plus any failures (with reasons).

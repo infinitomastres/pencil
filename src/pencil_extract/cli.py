@@ -9,7 +9,7 @@ import sys
 
 from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
-from pencil_extract import events, photos
+from pencil_extract import events, messages as messages_mod, photos
 from pencil_extract import state as state_mod
 from pencil_extract.api_sniff import Sniffer
 from pencil_extract.auth import BASE_URL, ensure_logged_in, open_context
@@ -84,6 +84,34 @@ SWITCH_KID_JS = """
 }
 """
 
+# Read messages from whatever scope exposes them. Multiple candidate field
+# names because we don't yet know what Pencil's controller named the array.
+READ_MESSAGES_JS = """
+() => {
+  if (typeof angular === 'undefined') return null;
+  const selectors = ['.drawer-content', '.maindiv', '[ui-view]', '[ng-app]', 'body'];
+  const keys = ['messages', 'mensajes', 'conversations', 'threads', 'inbox', 'pendingMessages'];
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      let scope = angular.element(el).scope();
+      while (scope) {
+        const vm = scope.vm;
+        if (vm) {
+          for (const key of keys) {
+            const v = vm[key];
+            if (Array.isArray(v) && v.length) {
+              try { return JSON.parse(JSON.stringify(v)); } catch (e) { return null; }
+            }
+          }
+        }
+        scope = scope.$parent;
+      }
+    }
+  }
+  return null;
+}
+"""
+
 
 async def _extract(headless: bool) -> None:
     config = Config.from_env()
@@ -128,13 +156,23 @@ async def _extract(headless: bool) -> None:
         )
         await sniffer.settle(2.0)
 
+        # Messages page — we don't yet know the exact XHR shape, so
+        # navigate without a strict expect_response and let the sniffer
+        # catch anything matching the URL patterns we probe for.
+        await _navigate_messages(page, sniffer)
+        spa_messages = await _read_messages_from_spa(page)
+
         new_photos = await photos.scrape(page, seen, sniffer.captures, spa_kids=spa_kids)
         new_events = events.scrape(seen, sniffer.captures)
+        new_messages = messages_mod.scrape(seen, sniffer.captures, spa_messages=spa_messages)
 
         await context.close()
 
-    print(f"Staged {len(new_photos)} photos and {len(new_events)} events into staging/.")
-    print('Next: ask Claude in this repo to "sync" (see SYNC.md).')
+    print(
+        f"Staged {len(new_photos)} photos, {len(new_events)} events, "
+        f"and {len(new_messages)} messages into staging/."
+    )
+    print('Next: ask Claude in this repo to "sync" or "summarize" (see SYNC.md / SUMMARIZE.md).')
 
 
 async def _navigate_and_wait_for(
@@ -175,6 +213,46 @@ async def _read_kids_from_spa(page) -> list[dict]:
         print(f"could not read kids from SPA scope: {exc}")
         return []
     return result or []
+
+
+async def _read_messages_from_spa(page) -> list[dict]:
+    """Read whatever message array lives on the messages controller scope."""
+    try:
+        result = await page.evaluate(READ_MESSAGES_JS)
+    except Exception as exc:
+        print(f"could not read messages from SPA scope: {exc}")
+        return []
+    if not result:
+        return []
+    import json as _json
+    try:
+        (RAW_DIR / "_spa_messages.json").write_text(
+            _json.dumps(result, indent=2, default=str) + "\n"
+        )
+    except Exception:
+        pass
+    return result
+
+
+async def _navigate_messages(page, sniffer: Sniffer) -> None:
+    """Navigate to /#/mensajes and let the sniffer catch whatever XHRs fire.
+
+    We don't pin an expect_response on a specific URL fragment because we
+    haven't yet confirmed which endpoints the messages controller hits —
+    the sniffer's URL probe in api_sniff.py catches the candidates.
+    """
+    url = f"{BASE_URL}#/mensajes"
+    try:
+        if page.url.rstrip("/") != url.rstrip("/"):
+            await page.goto(url, wait_until="domcontentloaded")
+    except PWTimeout:
+        print("warning: /#/mensajes navigation timed out")
+        return
+    # Generous settle — messaging often fans out into multiple XHRs +
+    # Firestore Listen reconnects, all of which we want to observe.
+    await sniffer.settle(4.0)
+    await _scroll_to_end(page)
+    await sniffer.settle(2.0)
 
 
 def _dump_kids_for_debug(spa_kids: list[dict]) -> None:
