@@ -44,6 +44,7 @@ READ_KIDS_JS = """
                 id: String(id),
                 name: String(k.name || k.lastname || id),
                 location_id: k.location_id || k.locationId || k.daycare || null,
+                raw: k,  // for debug dump
               });
             }
           }
@@ -54,6 +55,32 @@ READ_KIDS_JS = """
     }
   }
   return null;
+}
+"""
+
+# Drive the SPA's own kid-switcher rather than guessing per-kid URL params.
+# The Angular controller's changeKid(kid) handler triggers a fresh
+# /memory-maker XHR with the correct kid-id AND the correct location-id for
+# that kid — saves us reverse-engineering which kid lives where.
+SWITCH_KID_JS = """
+(targetId) => {
+  if (typeof angular === 'undefined') return 'no-angular';
+  const selectors = ['.drawer-kids', '.drawer-content', '.maindiv', '[ui-view]', '[ng-app]', 'body'];
+  for (const sel of selectors) {
+    for (const el of document.querySelectorAll(sel)) {
+      let scope = angular.element(el).scope();
+      while (scope) {
+        if (scope.vm && Array.isArray(scope.vm.totalKids) && typeof scope.vm.changeKid === 'function') {
+          const kid = scope.vm.totalKids.find(k => String(k.id) === String(targetId));
+          if (!kid) return 'kid-not-found';
+          scope.$apply(() => scope.vm.changeKid(kid));
+          return 'ok';
+        }
+        scope = scope.$parent;
+      }
+    }
+  }
+  return 'no-scope';
 }
 """
 
@@ -85,6 +112,12 @@ async def _extract(headless: bool) -> None:
         await sniffer.settle()
 
         spa_kids = await _read_kids_from_spa(page)
+        _dump_kids_for_debug(spa_kids)
+
+        # For each kid the SPA didn't fetch automatically, ask the SPA to
+        # switch to them — that fires a new /memory-maker XHR with the right
+        # location-id for that kid (which we'd otherwise have to guess).
+        await _fetch_other_kids(page, sniffer, spa_kids)
 
         # Calendar page
         await _navigate_and_wait_for(
@@ -142,6 +175,60 @@ async def _read_kids_from_spa(page) -> list[dict]:
         print(f"could not read kids from SPA scope: {exc}")
         return []
     return result or []
+
+
+def _dump_kids_for_debug(spa_kids: list[dict]) -> None:
+    if not spa_kids:
+        return
+    import json
+    path = RAW_DIR / "_spa_kids.json"
+    try:
+        path.write_text(json.dumps(spa_kids, indent=2, default=str) + "\n")
+    except Exception:
+        pass
+
+
+async def _fetch_other_kids(page, sniffer: Sniffer, spa_kids: list[dict]) -> None:
+    """Trigger the SPA to fetch photos for each kid we haven't already sniffed."""
+    if not spa_kids:
+        return
+
+    already_fetched = _sniffed_kid_ids(sniffer.captures.photos_pages)
+    targets = [k for k in spa_kids if str(k["id"]) not in already_fetched]
+    if not targets:
+        return
+
+    print(f"Switching SPA to fetch photos for {len(targets)} other kid(s): "
+          f"{[k.get('name') for k in targets]}")
+
+    for kid in targets:
+        kid_id = str(kid["id"])
+        kid_name = kid.get("name") or kid_id
+        try:
+            async with page.expect_response(
+                lambda r: "/memory-maker/mykid-utc" in r.url and r.status < 400,
+                timeout=XHR_WAIT_MS,
+            ):
+                result = await page.evaluate(SWITCH_KID_JS, kid_id)
+                if result != "ok":
+                    print(f"  {kid_name}: changeKid returned {result!r}, skipping")
+                    continue
+        except PWTimeout:
+            print(f"  {kid_name}: no memory-maker XHR after switch — skipping")
+            continue
+        await _scroll_to_end(page)
+        await sniffer.settle()
+
+
+def _sniffed_kid_ids(photos_pages) -> set[str]:
+    from urllib.parse import parse_qs, urlsplit
+    ids: set[str] = set()
+    for cap in photos_pages:
+        params = parse_qs(urlsplit(cap.url).query)
+        kid = (params.get("kid-id") or [""])[0]
+        if kid:
+            ids.add(kid)
+    return ids
 
 
 async def _scroll_to_end(page) -> None:
