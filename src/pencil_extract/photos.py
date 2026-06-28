@@ -103,12 +103,18 @@ async def scrape(
             if not page_items:
                 break
             all_memories.extend(page_items)
+            # Pencil returns memories newest-first. Once a whole page is
+            # all-already-known (in seen, or already on disk from a prior
+            # extract), assume older pages are too and stop paginating.
+            if _all_records_known(page_items, seen):
+                break
             if len(page_items) < PAGE_SIZE:
                 break
             skip += PAGE_SIZE
 
     staged: list[StagedPhoto] = []
     staged_ids: set[str] = set()
+    skipped_existing = 0
     for memory in all_memories:
         for record in _expand(memory):
             photo_id = record["id"]
@@ -117,6 +123,11 @@ async def scrape(
             if not record["url"]:
                 continue
             staged_ids.add(photo_id)
+            # Already on disk from a previous extract that hasn't been
+            # synced yet? Skip the download but don't count it as "new".
+            if _on_disk(record["kid"], photo_id):
+                skipped_existing += 1
+                continue
             saved = await _download(page, record["url"], record["kid"], photo_id)
             if not saved:
                 continue
@@ -129,6 +140,9 @@ async def scrape(
                 taken_at=record["taken_at"],
                 saved_path=str(saved.relative_to(PHOTOS_DIR.parent.parent)),
             ))
+
+    if skipped_existing:
+        print(f"  skipped {skipped_existing} photo(s) already on disk from a prior extract")
 
     return staged
 
@@ -159,6 +173,27 @@ def _anchors(caps: list[Capture]) -> dict[tuple[str, str, str], int]:
         if skip > out.get(key, -1):
             out[key] = skip
     return out
+
+
+def _on_disk(kid: str, photo_id: str) -> bool:
+    """True if this photo's sidecar JSON already exists under staging/photos/<kid>/."""
+    kid_dir = PHOTOS_DIR / (_slug(kid) or "default")
+    if not kid_dir.exists():
+        return False
+    return any(kid_dir.glob(f"{photo_id}.*.json"))
+
+
+def _all_records_known(memories: list[Any], seen: Seen) -> bool:
+    """True if every photo record across these memories is already known
+    (synced or staged on disk). Used to short-circuit pagination."""
+    for mem in memories:
+        for rec in _expand(mem):
+            if rec["id"] in seen.photos:
+                continue
+            if _on_disk(rec["kid"], rec["id"]):
+                continue
+            return False
+    return True
 
 
 
