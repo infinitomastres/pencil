@@ -1,9 +1,14 @@
-"""Photo feed scraper.
+"""Photo extractor — works off captured `/memory-maker/mykid-utc` responses.
 
-The selectors here are placeholders — we cannot know the real DOM until the
-first `inspect` run. The shape of the code (iterate children, walk feed, diff
-against seen, stage with sidecar metadata) is what we'll keep; selectors and
-the navigation routes are the parts to update.
+The SPA paginates with `skip`/`take` query params. We use whatever the
+browser already requested as our anchor (so we get the right
+`kid-id`/`location-id`/`user_utc` without having to reconstruct them from
+the related-users response), then paginate forward with `page.request.get`
+until a short page indicates the end.
+
+The exact JSON shape isn't documented anywhere — we parse defensively and
+fall back to writing the raw body to `staging/_raw/` so we can debug if
+something doesn't match.
 """
 
 from __future__ import annotations
@@ -13,120 +18,226 @@ import json
 import mimetypes
 import re
 from dataclasses import dataclass
-from urllib.parse import urlparse
+from pathlib import Path
+from typing import Any
+from urllib.parse import parse_qs, urlencode, urlsplit, urlunsplit
 
 from playwright.async_api import Page
 
+from pencil_extract.api_sniff import Capture, Captures
 from pencil_extract.paths import PHOTOS_DIR
 from pencil_extract.state import Seen
 
-PHOTOS_ROUTE = "https://familias.pencilapp.net/#/photos"
-
-# Placeholders — refine from `staging/_probes/<run>/landing.html`.
-PHOTO_CARD_SELECTOR = '[data-testid="photo-card"], article.photo, .photo-item'
-PHOTO_IMG_SELECTOR = "img"
-PHOTO_ID_ATTR = "data-id"
+PAGE_SIZE = 35
+MEMORY_MAKER_PATH = "/memory-maker/mykid-utc"
 
 
 @dataclass
 class StagedPhoto:
     id: str
-    child: str
-    url: str
+    kid: str
+    media_url: str
     caption: str
-    taken_at: str  # ISO-8601 or empty
+    taken_at: str
+    saved_path: str
 
 
-async def scrape(page: Page, seen: Seen) -> list[StagedPhoto]:
-    """Walk the photo feed for every child profile, staging anything new."""
+async def scrape(page: Page, seen: Seen, captures: Captures) -> list[StagedPhoto]:
     PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+
+    if not captures.photos_pages:
+        print("WARNING: no /memory-maker responses captured — did the photos page load?")
+        return []
+
+    # Aggregate every memory we saw the SPA fetch, then paginate forward
+    # from the largest `skip` seen per (kid, location, utc) tuple.
+    all_memories: list[Any] = []
+    for cap in captures.photos_pages:
+        all_memories.extend(_as_list(cap.body))
+
+    for anchor, max_skip in _anchors(captures.photos_pages).items():
+        kid_id, loc_id, utc = anchor
+        skip = max_skip + PAGE_SIZE
+        while True:
+            url = _build_url(kid_id, loc_id, utc, skip)
+            resp = await page.request.get(url)
+            if not resp.ok:
+                break
+            try:
+                body = await resp.json()
+            except Exception:
+                break
+            page_items = _as_list(body)
+            if not page_items:
+                break
+            all_memories.extend(page_items)
+            if len(page_items) < PAGE_SIZE:
+                break
+            skip += PAGE_SIZE
+
     staged: list[StagedPhoto] = []
-
-    for child in await _list_children(page):
-        await _select_child(page, child)
-        await page.goto(PHOTOS_ROUTE, wait_until="networkidle")
-        await _scroll_to_end(page)
-
-        for card in await page.query_selector_all(PHOTO_CARD_SELECTOR):
-            raw_id = await card.get_attribute(PHOTO_ID_ATTR)
-            img = await card.query_selector(PHOTO_IMG_SELECTOR)
-            src = await img.get_attribute("src") if img else None
-            if not src:
+    staged_ids: set[str] = set()
+    for memory in all_memories:
+        for record in _expand(memory):
+            photo_id = record["id"]
+            if photo_id in seen.photos or photo_id in staged_ids:
                 continue
-            photo_id = raw_id or hashlib.sha1(src.encode()).hexdigest()[:16]
-            if photo_id in seen.photos:
+            if not record["url"]:
                 continue
-
-            caption = (await card.inner_text() or "").strip()
-            taken_at = await card.get_attribute("data-date") or ""
-
-            saved_path = await _download(page, src, child, photo_id)
-            _write_sidecar(saved_path, photo_id, child, src, caption, taken_at)
+            staged_ids.add(photo_id)
+            saved = await _download(page, record["url"], record["kid"], photo_id)
+            if not saved:
+                continue
+            _write_sidecar(saved, record)
             staged.append(StagedPhoto(
-                id=photo_id, child=child, url=src, caption=caption, taken_at=taken_at,
+                id=photo_id,
+                kid=record["kid"],
+                media_url=record["url"],
+                caption=record["caption"],
+                taken_at=record["taken_at"],
+                saved_path=str(saved.relative_to(PHOTOS_DIR.parent.parent)),
             ))
 
     return staged
 
 
-async def _list_children(page: Page) -> list[str]:
-    """Return a list of child profile slugs to iterate.
+# ---------- helpers ----------
 
-    Placeholder: returns a single empty slug so the caller still runs. After
-    inspect we'll fill this in (children are usually listed in a sidebar or
-    profile-switcher menu).
+def _as_list(body: Any) -> list[Any]:
+    if isinstance(body, list):
+        return body
+    if isinstance(body, dict):
+        for key in ("data", "memories", "photos", "items", "results"):
+            v = body.get(key)
+            if isinstance(v, list):
+                return v
+    return []
+
+
+def _anchors(caps: list[Capture]) -> dict[tuple[str, str, str], int]:
+    """Group sniffed URLs by (kid-id, location-id, user_utc) → max skip seen."""
+    out: dict[tuple[str, str, str], int] = {}
+    for cap in caps:
+        params = parse_qs(urlsplit(cap.url).query)
+        kid = (params.get("kid-id") or [""])[0]
+        loc = (params.get("location-id") or [""])[0]
+        utc = (params.get("user_utc") or [""])[0]
+        skip = int((params.get("skip") or ["0"])[0] or 0)
+        key = (kid, loc, utc)
+        if skip > out.get(key, -1):
+            out[key] = skip
+    return out
+
+
+def _build_url(kid_id: str, loc_id: str, utc: str, skip: int) -> str:
+    qs = urlencode({
+        "skip": skip,
+        "take": PAGE_SIZE,
+        "kid-id": kid_id,
+        "location-id": loc_id,
+        "user_utc": utc,
+    })
+    return f"https://lts.pencilapp.net{MEMORY_MAKER_PATH}?{qs}"
+
+
+def _expand(memory: Any) -> list[dict[str, str]]:
+    """Turn one memory record into one or more (photo URL, metadata) rows.
+
+    A memory may contain a single photo, multiple photos, or a video. The
+    HTML hinted at `vm.memory.type == 'P'` vs 'V', `vm.memory.photos[0].photo`,
+    and `vm.memory.kids[0]`. We probe several likely field names.
     """
-    return [""]
+    if not isinstance(memory, dict):
+        return []
+
+    mem_id = str(memory.get("id") or memory.get("_id") or "")
+    kid = _kid_name(memory) or "default"
+    caption = str(memory.get("caption") or memory.get("text") or memory.get("description") or "")
+    taken_at = str(memory.get("date") or memory.get("created_at") or memory.get("createdAt") or "")
+
+    mem_type = (memory.get("type") or "").upper()
+    urls: list[tuple[str, str]] = []  # (url, sub_id)
+
+    if mem_type == "V":
+        v = memory.get("video") or memory.get("photo") or memory.get("url")
+        if v:
+            urls.append((str(v), "v"))
+    else:
+        photos = memory.get("photos")
+        if isinstance(photos, list):
+            for i, p in enumerate(photos):
+                url = p.get("photo") if isinstance(p, dict) else p
+                if url:
+                    urls.append((str(url), str(p.get("id") or i) if isinstance(p, dict) else str(i)))
+        else:
+            for key in ("photo", "url", "media"):
+                v = memory.get(key)
+                if v:
+                    urls.append((str(v), "0"))
+                    break
+
+    rows = []
+    for url, sub in urls:
+        photo_id = f"{mem_id}-{sub}" if mem_id else hashlib.sha1(url.encode()).hexdigest()[:16]
+        rows.append({
+            "id": photo_id,
+            "memory_id": mem_id,
+            "kid": kid,
+            "url": url,
+            "caption": caption,
+            "taken_at": taken_at,
+            "type": mem_type or "P",
+        })
+    return rows
 
 
-async def _select_child(page: Page, child: str) -> None:
-    """Switch the UI to the given child profile. No-op for the placeholder."""
-    return None
+def _kid_name(memory: dict[str, Any]) -> str:
+    kids = memory.get("kids")
+    if isinstance(kids, list) and kids:
+        first = kids[0]
+        if isinstance(first, dict):
+            return str(first.get("name") or first.get("kid_name") or first.get("id") or "")
+    for key in ("kid_name", "kid", "name"):
+        v = memory.get(key)
+        if v:
+            return str(v)
+    return ""
 
 
-async def _scroll_to_end(page: Page, max_iters: int = 50) -> None:
-    """Force lazy-loaded feeds to render everything we can see."""
-    last_height = 0
-    for _ in range(max_iters):
-        height = await page.evaluate("document.body.scrollHeight")
-        if height == last_height:
-            return
-        last_height = height
-        await page.mouse.wheel(0, height)
-        await page.wait_for_timeout(400)
-
-
-async def _download(page: Page, url: str, child: str, photo_id: str):
-    response = await page.request.get(url)
-    body = await response.body()
-    ext = _guess_ext(url, response.headers.get("content-type", ""))
-    child_dir = PHOTOS_DIR / (_slug(child) or "default")
-    child_dir.mkdir(parents=True, exist_ok=True)
-    path = child_dir / f"{photo_id}{ext}"
-    path.write_bytes(body)
-    return path
-
-
-def _write_sidecar(
-    media_path, photo_id: str, child: str, src: str, caption: str, taken_at: str
-) -> None:
-    sidecar = media_path.with_suffix(media_path.suffix + ".json")
-    sidecar.write_text(json.dumps({
-        "id": photo_id,
-        "child": child,
-        "source_url": src,
-        "caption": caption,
-        "taken_at": taken_at,
-    }, indent=2) + "\n")
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
 def _slug(value: str) -> str:
-    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+    return _SLUG_RE.sub("-", value.lower()).strip("-") or "default"
 
 
 def _guess_ext(url: str, content_type: str) -> str:
-    path = urlparse(url).path
-    for candidate in (path.rsplit(".", 1)[-1] if "." in path else "",):
-        if candidate and len(candidate) <= 5:
+    path = urlsplit(url).path
+    if "." in path:
+        candidate = path.rsplit(".", 1)[-1]
+        if 1 <= len(candidate) <= 5:
             return f".{candidate.lower()}"
-    return mimetypes.guess_extension(content_type.split(";")[0].strip()) or ".bin"
+    return mimetypes.guess_extension((content_type or "").split(";")[0].strip()) or ".bin"
+
+
+async def _download(page: Page, url: str, kid: str, photo_id: str) -> Path | None:
+    try:
+        response = await page.request.get(url)
+        if not response.ok:
+            print(f"download {photo_id}: HTTP {response.status} for {url}")
+            return None
+        body = await response.body()
+        ext = _guess_ext(url, response.headers.get("content-type", ""))
+        kid_dir = PHOTOS_DIR / _slug(kid)
+        kid_dir.mkdir(parents=True, exist_ok=True)
+        path = kid_dir / f"{photo_id}{ext}"
+        path.write_bytes(body)
+        return path
+    except Exception as exc:
+        print(f"download {photo_id}: {exc}")
+        return None
+
+
+def _write_sidecar(media_path: Path, record: dict[str, str]) -> None:
+    sidecar = media_path.with_suffix(media_path.suffix + ".json")
+    sidecar.write_text(json.dumps(record, indent=2) + "\n")

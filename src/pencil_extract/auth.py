@@ -1,13 +1,15 @@
 """Login flow against familias.pencilapp.net.
 
-The portal is a hash-routed SPA served via Cloudflare. Cloudflare's bot
-detection rejects logins from the default Playwright Chromium fingerprint
-(403 on the auth POST). We launch a persistent context with the user's
-installed Google Chrome and the `AutomationControlled` blink feature
-disabled — that's enough to look like a real browser for this site.
+The portal is a hash-routed AngularJS 1.x SPA served via Cloudflare. The
+login form is `<input type="submit" value="Entrar">` gated by `ng-disabled`
+on form validity — Playwright's `fill()` dispatches `input` events that
+ng-model picks up, so we just have to wait for the submit to become enabled
+before clicking.
 
-Selectors are placeholders until the first `inspect` run gives us real ones.
-They are kept in one place so they're easy to update.
+We use a persistent context + the user's installed Chrome to avoid
+Cloudflare's bot-detection 403 on the auth POST. Cookies and localStorage
+survive across runs via the persistent user-data dir, so subsequent runs
+skip the form while the session is still valid.
 """
 
 from __future__ import annotations
@@ -26,14 +28,10 @@ from pencil_extract.paths import PLAYWRIGHT_DIR
 BASE_URL = "https://familias.pencilapp.net/"
 LOGIN_URL = "https://familias.pencilapp.net/#/login"
 
-# Placeholder selectors. Refine after running `python -m pencil_extract inspect`.
-EMAIL_SELECTOR = 'input[type="email"], input[name="email"], input[autocomplete="username"]'
-PASSWORD_SELECTOR = 'input[type="password"], input[name="password"]'
-SUBMIT_SELECTOR = 'button[type="submit"]'
+EMAIL_SELECTOR = 'input[name="email"][type="email"]'
+PASSWORD_SELECTOR = 'input[name="password"][type="password"]'
+SUBMIT_SELECTOR = 'input[type="submit"].login-button'
 
-# Launch args that strip the most obvious Playwright/CDP fingerprints. Not
-# bulletproof against advanced bot detection, but enough for run-of-the-mill
-# Cloudflare rules.
 STEALTH_ARGS = [
     "--disable-blink-features=AutomationControlled",
     "--disable-features=IsolateOrigins,site-per-process",
@@ -43,13 +41,7 @@ STEALTH_ARGS = [
 
 
 async def open_context(playwright: Playwright, *, headless: bool = True) -> BrowserContext:
-    """Open a Chromium context that doesn't trip Cloudflare bot detection.
-
-    Persistent context with a real user-data dir + Google Chrome channel
-    (falls back to bundled Chromium if Chrome isn't installed). Cookies and
-    localStorage survive across runs automatically, so we don't need a
-    separate storage-state file.
-    """
+    """Open a Chromium context that doesn't trip Cloudflare bot detection."""
     PLAYWRIGHT_DIR.mkdir(parents=True, exist_ok=True)
     user_data_dir = PLAYWRIGHT_DIR / "user-data"
 
@@ -66,15 +58,15 @@ async def open_context(playwright: Playwright, *, headless: bool = True) -> Brow
             channel="chrome", **common,
         )
     except PWError:
-        # Chrome channel not installed; fall back to bundled Chromium.
         return await playwright.chromium.launch_persistent_context(**common)
 
 
 async def ensure_logged_in(context: BrowserContext, config: Config) -> Page:
     """Return a Page sitting on the app after a successful login.
 
-    If the persistent context already has a valid Pencil session cookie this
-    is a no-op navigate. Otherwise we fill the login form and submit.
+    If the persistent context already has a valid session this is a no-op
+    navigate. Otherwise we fill the login form, wait for Angular to enable
+    the submit button (ng-disabled is bound to form validity), and click.
     """
     page = context.pages[0] if context.pages else await context.new_page()
     await page.goto(BASE_URL, wait_until="domcontentloaded")
@@ -84,7 +76,7 @@ async def ensure_logged_in(context: BrowserContext, config: Config) -> Page:
         return page
 
     await _fill_login_form(page, config)
-    await page.wait_for_url(lambda url: "#/login" not in url, timeout=30_000)
+    await page.wait_for_url(lambda url: "#/login" not in url, timeout=60_000)
     await page.wait_for_load_state("networkidle")
     return page
 
@@ -95,9 +87,17 @@ async def _fill_login_form(page: Page, config: Config) -> None:
     except PWTimeout as exc:
         raise RuntimeError(
             "Could not find the email input on the login page. "
-            "Run `python -m pencil_extract inspect` and update EMAIL_SELECTOR in auth.py."
+            "Run `python -m pencil_extract inspect` to capture the current DOM."
         ) from exc
 
     await page.fill(EMAIL_SELECTOR, config.email)
     await page.fill(PASSWORD_SELECTOR, config.password)
+
+    # ng-disabled keeps the submit input disabled until Angular re-validates
+    # after our input events. Wait for that before clicking.
+    await page.wait_for_function(
+        f"() => {{ const el = document.querySelector('{SUBMIT_SELECTOR}');"
+        " return el && !el.disabled; }}",
+        timeout=10_000,
+    )
     await page.click(SUBMIT_SELECTOR)

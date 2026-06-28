@@ -13,5 +13,6 @@ PROBES_DIR = STATE_DIR / "_probes"
 STAGING_DIR = REPO_ROOT / "staging"
 PHOTOS_DIR = STAGING_DIR / "photos"
 EVENTS_FILE = STAGING_DIR / "events.json"
+RAW_DIR = STAGING_DIR / "_raw"
 
 PLAYWRIGHT_DIR = REPO_ROOT / ".playwright"
