@@ -62,6 +62,9 @@ async def _extract(headless: bool) -> None:
 
         await context.close()
 
+    print(f"Staged {len(new_photos)} photos and {len(new_events)} events into staging/.")
+    print('Next: ask Claude in this repo to "sync" (see SYNC.md).')
+
 
 async def _navigate_and_wait_for(
     page,
@@ -91,9 +94,6 @@ async def _navigate_and_wait_for(
     except PWTimeout:
         print(f"warning: {label} XHR ({xhr_substring}) did not fire within "
               f"{XHR_WAIT_MS // 1000}s — continuing with whatever the sniffer caught.")
-
-    print(f"Staged {len(new_photos)} photos and {len(new_events)} events into staging/.")
-    print('Next: ask Claude in this repo to "sync" (see SYNC.md).')
 
 
 async def _scroll_to_end(page) -> None:
