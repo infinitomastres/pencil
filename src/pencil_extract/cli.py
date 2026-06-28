@@ -21,7 +21,7 @@ SCROLL_STEPS = 60         # photo feed lazy-loads on scroll; cap iterations
 SCROLL_PAUSE_MS = 500
 
 
-async def _extract() -> None:
+async def _extract(headless: bool) -> None:
     config = Config.from_env()
     seen = state_mod.load()
     STAGING_DIR.mkdir(parents=True, exist_ok=True)
@@ -30,7 +30,7 @@ async def _extract() -> None:
     RAW_DIR.mkdir(parents=True, exist_ok=True)
 
     async with async_playwright() as pw:
-        context = await open_context(pw, headless=True)
+        context = await open_context(pw, headless=headless)
         page = context.pages[0] if context.pages else await context.new_page()
 
         sniffer = Sniffer(page, raw_dir=RAW_DIR)
@@ -75,7 +75,16 @@ def _clear_staging() -> None:
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(prog="pencil-extract")
     sub = parser.add_subparsers(dest="cmd", required=True)
-    sub.add_parser("extract", help="Log in, scrape via API sniffing, stage new items")
+    # extract defaults to headed mode during bring-up — Cloudflare flags
+    # headless Chrome harder than headed. Once the API parsing is proven,
+    # flip the default to headless for unattended scheduled runs.
+    ext = sub.add_parser("extract", help="Log in, scrape via API sniffing, stage new items")
+    ext.add_argument(
+        "--headless",
+        action="store_true",
+        help="Run without a visible browser window. May 403 on Cloudflare; "
+             "use only after the extractor is otherwise stable.",
+    )
     sub.add_parser("inspect", help="Open a visible browser and dump DOM/network probes")
     sub.add_parser("clear-staging", help="Wipe staging/ without touching .state/seen.json")
 
@@ -83,7 +92,7 @@ def main(argv: list[str] | None = None) -> None:
 
     try:
         if args.cmd == "extract":
-            asyncio.run(_extract())
+            asyncio.run(_extract(headless=args.headless))
         elif args.cmd == "inspect":
             from pencil_extract.inspect import main as inspect_main
             inspect_main()
