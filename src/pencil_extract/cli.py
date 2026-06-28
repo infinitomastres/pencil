@@ -7,7 +7,7 @@ import asyncio
 import shutil
 import sys
 
-from playwright.async_api import async_playwright
+from playwright.async_api import async_playwright, TimeoutError as PWTimeout
 
 from pencil_extract import events, photos
 from pencil_extract import state as state_mod
@@ -19,6 +19,7 @@ from pencil_extract.paths import RAW_DIR, STAGING_DIR
 
 SCROLL_STEPS = 60         # photo feed lazy-loads on scroll; cap iterations
 SCROLL_PAUSE_MS = 500
+XHR_WAIT_MS = 20_000      # bound how long we wait for a specific API call
 
 
 async def _extract(headless: bool) -> None:
@@ -36,20 +37,60 @@ async def _extract(headless: bool) -> None:
         sniffer = Sniffer(page, raw_dir=RAW_DIR)
         await ensure_logged_in(context, config)
 
-        # Photos page — drive the SPA to fetch the first page(s), then we
-        # paginate forward from sniffed URLs.
-        await page.goto(f"{BASE_URL}#/home", wait_until="networkidle")
+        # Photos page — wait specifically for the memory-maker XHR rather
+        # than networkidle (Firestore keeps the network busy forever).
+        await _navigate_and_wait_for(
+            page,
+            url=f"{BASE_URL}#/home",
+            xhr_substring="/memory-maker/mykid-utc",
+            label="photos feed",
+        )
         await _scroll_to_end(page)
         await sniffer.settle()
 
         # Calendar page
-        await page.goto(f"{BASE_URL}#/agenda", wait_until="networkidle")
+        await _navigate_and_wait_for(
+            page,
+            url=f"{BASE_URL}#/agenda",
+            xhr_substring="/appointments-per-user",
+            label="calendar feed",
+        )
         await sniffer.settle(2.0)
 
         new_photos = await photos.scrape(page, seen, sniffer.captures)
         new_events = events.scrape(seen, sniffer.captures)
 
         await context.close()
+
+
+async def _navigate_and_wait_for(
+    page,
+    *,
+    url: str,
+    xhr_substring: str,
+    label: str,
+) -> None:
+    """Navigate (if needed) and wait for a specific XHR to fire.
+
+    Hash-route navigations don't re-trigger window load events, so we
+    can't rely on `wait_until="load"`. Instead we set up an `expect_response`
+    around the navigation and tolerate the timeout (the XHR may have
+    already fired during login if the SPA's landing route is the same).
+    """
+    same_url = page.url.rstrip("/") == url.rstrip("/")
+    try:
+        async with page.expect_response(
+            lambda r: xhr_substring in r.url and r.status < 400,
+            timeout=XHR_WAIT_MS,
+        ):
+            if not same_url:
+                await page.goto(url, wait_until="domcontentloaded")
+            # If we're already on the target URL the SPA may have fetched
+            # this XHR during login. expect_response will catch it if it
+            # fires within the timeout; otherwise we just move on.
+    except PWTimeout:
+        print(f"warning: {label} XHR ({xhr_substring}) did not fire within "
+              f"{XHR_WAIT_MS // 1000}s — continuing with whatever the sniffer caught.")
 
     print(f"Staged {len(new_photos)} photos and {len(new_events)} events into staging/.")
     print('Next: ask Claude in this repo to "sync" (see SYNC.md).')

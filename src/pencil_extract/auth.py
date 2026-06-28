@@ -69,15 +69,26 @@ async def ensure_logged_in(context: BrowserContext, config: Config) -> Page:
     the submit button (ng-disabled is bound to form validity), and click.
     """
     page = context.pages[0] if context.pages else await context.new_page()
+    # `networkidle` is unreliable here: after login the SPA opens a Firestore
+    # long-poll channel that keeps the network busy forever. Stick to load
+    # events and explicit selectors/URLs.
     await page.goto(BASE_URL, wait_until="domcontentloaded")
-    await page.wait_for_load_state("networkidle")
+
+    # Hash-routed SPA — give Angular a moment to render either the login
+    # form or the post-login layout before we branch.
+    try:
+        await page.wait_for_selector(
+            f'{EMAIL_SELECTOR}, body.background-general, body.background-memory',
+            timeout=15_000,
+        )
+    except PWTimeout:
+        pass
 
     if "#/login" not in page.url:
         return page
 
     await _fill_login_form(page, config)
     await page.wait_for_url(lambda url: "#/login" not in url, timeout=60_000)
-    await page.wait_for_load_state("networkidle")
     return page
 
 

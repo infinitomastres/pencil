@@ -57,7 +57,10 @@ async def run() -> None:
 
         page = context.pages[0] if context.pages else await context.new_page()
         await page.goto(BASE_URL, wait_until="domcontentloaded")
-        await page.wait_for_load_state("networkidle")
+        # Don't wait for networkidle — Firestore long-polls after login and
+        # we'd hang indefinitely. A short sleep lets Angular render the
+        # login form into the DOM.
+        await asyncio.sleep(2)
 
         (run_dir / "login.html").write_text(await page.content())
         (run_dir / "login.url").write_text(page.url + "\n")
@@ -73,7 +76,8 @@ async def run() -> None:
             lambda url: "#/login" not in url,
             timeout=LOGIN_TIMEOUT_MS,
         )
-        await page.wait_for_load_state("networkidle")
+        # Brief settle, but no networkidle wait (Firestore now connected).
+        await asyncio.sleep(2)
 
         print("Logged in. Session is cached in .playwright/user-data for reuse.")
 
