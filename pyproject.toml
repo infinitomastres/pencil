@@ -1,0 +1,19 @@
+[project]
+name = "pencil-extract"
+version = "0.1.0"
+description = "Extract photos and calendar events from the Pencil school-family app"
+requires-python = ">=3.11"
+dependencies = [
+    "playwright>=1.49",
+    "python-dotenv>=1.0",
+]
+
+[project.scripts]
+pencil-extract = "pencil_extract.cli:main"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
