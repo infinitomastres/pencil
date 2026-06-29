@@ -49,7 +49,13 @@ def scrape(
         candidates.extend(spa_messages)
 
     if not candidates:
-        print("WARNING: no messages captured — /#/mensajes endpoint shape may differ.")
+        unseen_total = _count_unseen(captures.messages)
+        if unseen_total > 0:
+            print(
+                f"WARNING: inbox reports {unseen_total} unseen message(s) but "
+                "we couldn't parse any. Message bodies stream via Firestore; "
+                "per-thread scraping isn't wired up yet."
+            )
         return []
 
     staged: list[StagedMessage] = []
@@ -160,6 +166,27 @@ def _parse(raw: Any) -> StagedMessage | None:
         is_read=is_read,
         attachments=attachments,
     )
+
+
+def _count_unseen(message_captures: list) -> int:
+    """Sum `unseen` counts from `/get-staff-pending-messages` inbox responses.
+
+    Body shape is `{"staff": [{"id": ..., "unseen": N, ...}, ...]}`. Zero
+    unseen across the board means the inbox is genuinely empty — no warning
+    needed. Non-zero means we have data we're failing to fetch.
+    """
+    total = 0
+    for cap in message_captures:
+        body = getattr(cap, "body", None)
+        if not isinstance(body, dict):
+            continue
+        staff = body.get("staff")
+        if not isinstance(staff, list):
+            continue
+        for s in staff:
+            if isinstance(s, dict) and isinstance(s.get("unseen"), (int, float)):
+                total += int(s["unseen"])
+    return total
 
 
 def _first_str(d: dict, *keys: str) -> str:

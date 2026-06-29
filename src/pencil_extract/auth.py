@@ -108,7 +108,7 @@ async def _fill_login_form(page: Page, config: Config) -> None:
     # after our input events. Wait for that before clicking.
     await page.wait_for_function(
         f"() => {{ const el = document.querySelector('{SUBMIT_SELECTOR}');"
-        " return el && !el.disabled; }}",
+        " return el && !el.disabled; }",
         timeout=10_000,
     )
     await page.click(SUBMIT_SELECTOR)

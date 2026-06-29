@@ -59,6 +59,14 @@ plain-text heads-up of anything actionable.
    message dedupe happens at extract time. Re-reading the same messages
    produces the same summary (idempotent).
 
-5. **Report one line back to the user** — message count + section
-   counts. Example: `Summarized 42 messages → 3 homework, 1 permission
-   slip, 2 events, 1 needs response. See staging/summary.md.`
+5. **Count staged photos** — anything under `staging/photos/<kid>/*` that
+   isn't a `.json` sidecar is a photo or video file waiting to be synced
+   to Drive. These accumulate across days until `sync` runs. Report the
+   total and the per-kid breakdown.
+
+6. **Report one line back to the user** — message count + section
+   counts + staged-photo count. Example: `Summarized 42 messages → 3
+   homework, 1 permission slip, 2 events, 1 needs response. 28 photos
+   staged (Sebastián 15, Celeste 13) — run "sync" to push to Drive. See
+   staging/summary.md.` If there are no staged photos, drop that
+   sentence.
